@@ -62,23 +62,37 @@ type Unqlite struct {
 func Open(file string, mode OpenFlags) (*Unqlite,error) {
     f := C.CString(file)
     defer C.free(unsafe.Pointer(f))
-    var db Unqlite
+    db := &Unqlite{}
     e := C.unqlite_open(&db.db, f, C.uint(mode))
-    if e == C.UNQLITE_OK {
-        return &db, nil
+    if e != C.UNQLITE_OK {
+        return nil, code2Error(e)
     }
-    return nil, code2Error(e)
+    return db, nil
 }
+// Config database
 func (u *Unqlite)Config() {
+
 }
 func (u *Unqlite)Close() error{
-    e := C.unqlite_close(u.db)
-    return code2Error(e)
+    var err error
+    if u.db != nil {
+        e := C.unqlite_close(u.db)
+        err = code2Error(e)
+        u.db = nil
+    }
+    return err
 }
 
 // K-V store
 func (u *Unqlite)KvStore(key, value []byte) error {
-    e := C.unqlite_kv_store(u.db, unsafe.Pointer(&key[0]), C.int(len(key)), unsafe.Pointer(&value[0]), C.unqlite_int64(len(value)))
+    var k, v unsafe.Pointer
+    if len(key) > 0 {
+        k = unsafe.Pointer(&key[0])
+    }
+    if len(value) > 0 {
+        v = unsafe.Pointer(&value[0])
+    }
+    e := C.unqlite_kv_store(u.db, k, C.int(len(key)), v, C.unqlite_int64(len(value)))
     return code2Error(e)
 }
 func (u *Unqlite)KvStoreFmt(key []byte, format string, a...interface{}) error {
@@ -86,7 +100,14 @@ func (u *Unqlite)KvStoreFmt(key []byte, format string, a...interface{}) error {
     return u.KvStore(key,[]byte(val))
 }
 func (u *Unqlite)KvAppend(key, value []byte) error{
-    e := C.unqlite_kv_append(u.db, unsafe.Pointer(&key[0]), C.int(len(key)), unsafe.Pointer(&value[0]), C.unqlite_int64(len(value)))
+    var k, v unsafe.Pointer
+    if len(key) > 0 {
+        k = unsafe.Pointer(&key[0])
+    }
+    if len(value) > 0 {
+        v = unsafe.Pointer(&value[0])
+    }
+    e := C.unqlite_kv_append(u.db, k, C.int(len(key)), v, C.unqlite_int64(len(value)))
     return code2Error(e)
 }
 func (u *Unqlite)KvAppendFmt(key []byte, format string, a... interface{})error{
@@ -104,7 +125,11 @@ func (u *Unqlite)KvFetch(key, value []byte) ([]byte, error){
     return value[:n], err
 }
 func (u *Unqlite)KvDelete(key []byte)error{
-    e := C.unqlite_kv_delete(u.db, unsafe.Pointer(&key[0]), C.int(len(key)))
+    var k unsafe.Pointer
+    if len(key) > 0 {
+        k = unsafe.Pointer(&key[0])
+    }
+    e := C.unqlite_kv_delete(u.db, k, C.int(len(key)))
     return code2Error(e)
 }
 func (u *Unqlite)Kv_config_hash(hash func([]byte) uint) {
@@ -119,7 +144,7 @@ func (u *Unqlite)NewCursor() (*Cursor,error) {
     e := C.unqlite_kv_cursor_init(u.db, &(cur.c))
     return &cur, code2Error(e)
 }
-func (u *Unqlite)Release(c *Cursor)error{
+func (u *Unqlite)ReleaseCursor(c *Cursor)error{
     e := C.unqlite_kv_cursor_release(u.db, c.c)
     c.c = nil
     return code2Error(e)
@@ -132,7 +157,11 @@ func (c *Cursor)Reset()error{
 // positioning database cursors
 
 func (c *Cursor)Seek(key []byte, iPos int)error{
-    e := C.unqlite_kv_cursor_seek(c.c, unsafe.Pointer(&key[0]), C.int(len(key)), C.int(iPos))
+    var k unsafe.Pointer
+    if len(key)>0 {
+        k = unsafe.Pointer(&key[0])
+    }
+    e := C.unqlite_kv_cursor_seek(c.c, k, C.int(len(key)), C.int(iPos))
     return code2Error(e)
 }
 func (c *Cursor)First()error{
@@ -143,7 +172,7 @@ func (c *Cursor)Last()error{
     e := C.unqlite_kv_cursor_last_entry(c.c)
     return code2Error(e)
 }
-func (c *Cursor)Valid()error{
+func (c *Cursor)IsValid()error{
     e := C.unqlite_kv_cursor_valid_entry(c.c)
     return code2Error(e)
 }
@@ -158,15 +187,41 @@ func (c *Cursor)Prev()error{
 
 // extracting data from database cursors
 
-func (c *Cursor)Key(value []byte) (int,error) {
-    outlen := C.int(len(value))
-    e := C.unqlite_kv_cursor_key(c.c, unsafe.Pointer(&value[0]), &outlen)
-    return int(outlen), code2Error(e)
+// get key from the cursor, key can be nil
+func (c *Cursor)Key(key []byte) ([]byte,error) {
+    var k unsafe.Pointer
+    outlen := C.int(len(key))
+    if outlen == 0 {
+        e := C.unqlite_kv_cursor_key(c.c, nil, &outlen)
+        if e != C.UNQLITE_OK {
+            return nil, code2Error(e)
+        }
+        key = make([]byte, outlen)
+    }
+    k = unsafe.Pointer(&key[0])
+    e := C.unqlite_kv_cursor_key(c.c, k, &outlen)
+    if e != C.UNQLITE_OK {
+        return nil, code2Error(e)
+    }
+    return key[:outlen], code2Error(e)
 }
-func (c *Cursor)Data(data []byte) (int64,error) {
+//get data from the cursor, data can be nil
+func (c *Cursor)Data(data []byte) ([]byte,error) {
+    var v unsafe.Pointer
     outlen := C.unqlite_int64(len(data))
-    e := C.unqlite_kv_cursor_data(c.c, unsafe.Pointer(&data[0]), &outlen)
-    return int64(outlen), code2Error(e)
+    if outlen == 0 {
+        e := C.unqlite_kv_cursor_data(c.c, nil, &outlen);
+        if e != C.UNQLITE_OK {
+            return nil, code2Error(e)
+        }
+        data = make([]byte, outlen)
+    }
+    v = unsafe.Pointer(&data[0])
+    e := C.unqlite_kv_cursor_data(c.c, v, &outlen)
+    if e != C.UNQLITE_OK {
+        return nil, code2Error(e)
+    }
+    return data[:outlen], code2Error(e)
 }
 
 
@@ -187,7 +242,7 @@ func (u *Unqlite)Compile(jx9Code string) (*Jx9, error){
     e := C.unqlite_compile(u.db, code, C.int(len(jx9Code)), &jx9.j)
     return &jx9, code2Error(e)
 }
-func (u *Unqlite)Compile_file(file string) (*Jx9, error) {
+func (u *Unqlite)CompileFile(file string) (*Jx9, error) {
     f := C.CString(file)
     defer C.free(unsafe.Pointer(f))
     var jx9 Jx9
@@ -199,7 +254,8 @@ func (j *Jx9)Release()error{
     j.j = nil
     return code2Error(e)
 }
-func (u Unqlite)Vm_config(){
+// to do ...
+func (u Unqlite)VmConfig(){
 }
 func (j *Jx9)Exec()error{
     e := C.unqlite_vm_exec(j.j)
@@ -310,7 +366,7 @@ func (c *Context)PeekAuxData() (interface{}, bool){
     }
     return nil, false
 }
-    
+
 
 // init value of Value
 func (v *Value)Int(i int)error{
@@ -385,8 +441,6 @@ func (v *Value)ToString() string {
 func (v *Value)ToResource() interface{}{
     p := C.unqlite_value_to_resource(v.v)
     return *(*interface{})(unsafe.Pointer(p))
-}
-func (v *Value)Cmp(v2 *Value, strict bool) int {
     bb := C.int(0)
     if strict {
         bb = C.int(1)
@@ -577,4 +631,3 @@ func Copyright() string {
     s := C.unqlite_lib_copyright()
     return C.GoString(s)
 }
-
